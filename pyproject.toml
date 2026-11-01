@@ -6,8 +6,16 @@ readme = "README.md"
 authors = [
     { name = "YJ", email = "doubt4230@naver.com" }
 ]
-requires-python = ">=3.9"
-dependencies = []
+requires-python = "==3.9.*"
+dependencies = [
+    "ipykernel>=6.31.0",
+    "ipywidgets>=8.1.9",
+    "matplotlib<3.9",
+    "numpy<2",
+    "obp==0.5.7",
+    "pandas<2",
+    "polars>=1.36.1",
+]
 
 [project.scripts]
 obd-bandit = "obd_bandit:main"
@@ -15,3 +23,7 @@ obd-bandit = "obd_bandit:main"
 [build-system]
 requires = ["uv_build>=0.13.6,<0.14.0"]
 build-backend = "uv_build"
+
+# obp가 요구하는 pyyaml 구버전 대신, 빌드 문제가 없는 6.x를 강제로 사용
+[tool.uv]
+override-dependencies = ["pyyaml>=6.0"]
