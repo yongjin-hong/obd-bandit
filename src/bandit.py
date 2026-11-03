@@ -34,6 +34,11 @@ class FeatureBuilder:
     - 아이템 피처: item_feature_0은 수치 그대로, item_feature_1~3은 원-핫
     - 상호작용 대상: interaction_feature_col에서 노출 수 기준 interaction_category_rank번째 범주
       (rank는 0부터 시작. 기본값 user_feature_0의 1번째 = EDA의 uf0_1)
+
+    use_position=True이면 뒤에 슬롯 구간 추가 (82 → 169차원):
+        [ ... | 슬롯 원-핫 (3) | 슬롯1 × 아이템 피처 (28) | 슬롯2 × 아이템 피처 (28) | 슬롯3 × 아이템 피처 (28) ]
+        - 슬롯×아이템 구간은 해당 슬롯 칸에만 아이템 피처, 나머지 슬롯 칸은 0
+        - 공통 아이템 효과(②) + 슬롯별 추가 효과 구조 → 정규화로 슬롯별 효과가 공통 효과 쪽으로 당겨짐
     """
 
     def __init__(
@@ -41,10 +46,14 @@ class FeatureBuilder:
         interaction_feature_col: str = "user_feature_0",
         interaction_category_rank: int = 1,
         rare_share_threshold: float = 0.01,
+        use_position: bool = False,
+        n_positions: int = 3,
     ):
         self.interaction_feature_col = interaction_feature_col
         self.interaction_category_rank = interaction_category_rank
         self.rare_share_threshold = rare_share_threshold
+        self.use_position = use_position
+        self.n_positions = n_positions
 
     # ----- 학습: 인코딩 기준 생성 -----
     def fit(self, log_df: pl.DataFrame, item_df: pl.DataFrame) -> "FeatureBuilder":
@@ -147,19 +156,43 @@ class FeatureBuilder:
         return user_matrix, interaction_flags
 
     # ----- 후보 행렬: 사용자 1명 × 후보 아이템 전체 -----
-    def build_candidates(self, user_vector: np.ndarray, interaction_flag: float) -> np.ndarray:
+    def build_candidates(self, user_vector: np.ndarray, interaction_flag: float,
+                         position: Optional[int] = None) -> np.ndarray:
         """
+        Args:
+            position: 슬롯 번호 (1 ~ n_positions). use_position=True일 때만 사용
         Returns:
             candidate_matrix: (n_items, n_dims). i번째 행 = 아이템 i를 추천할 때의 입력 벡터
         """
+        # ===== 기본 구간: 사용자 피처 | 아이템 피처 | 상호작용 =====
         user_block = np.tile(user_vector, (self.n_items, 1))
         interaction_block = interaction_flag * self.item_matrix
-        return np.hstack([user_block, self.item_matrix, interaction_block])
+        blocks = [user_block, self.item_matrix, interaction_block]
+
+        # ===== 슬롯 구간: 슬롯 원-핫 | 슬롯별 아이템 피처 (해당 슬롯 칸에만 값) =====
+        if self.use_position:
+            if position is None:
+                raise ValueError("use_position=True이면 position이 필요합니다.")
+            slot_index = int(position) - 1
+
+            position_onehot_block = np.zeros((self.n_items, self.n_positions))
+            position_onehot_block[:, slot_index] = 1.0
+
+            position_item_block = np.zeros((self.n_items, self.n_positions * self.n_item_dims))
+            slot_start = slot_index * self.n_item_dims
+            position_item_block[:, slot_start:slot_start + self.n_item_dims] = self.item_matrix
+
+            blocks += [position_onehot_block, position_item_block]
+
+        return np.hstack(blocks)
 
     # ----- 확인용 정보 -----
     @property
     def n_dims(self) -> int:
-        return self.n_user_dims + 2 * self.n_item_dims
+        base_dims = self.n_user_dims + 2 * self.n_item_dims
+        if self.use_position:
+            return base_dims + self.n_positions * (1 + self.n_item_dims)
+        return base_dims
 
     @property
     def user_feature_names(self) -> List[str]:
@@ -302,6 +335,7 @@ class ReplayData:
         self.feature_builder = feature_builder
         self.logged_items = log_df["item_id"].to_numpy()
         self.logged_clicks = log_df["click"].to_numpy().astype(float)
+        self.positions = log_df["position"].to_numpy()
         self.user_matrix, self.interaction_flags = feature_builder.transform_users(log_df)
         self.n_rows = log_df.height
         self.logged_ctr = float(self.logged_clicks.mean())
@@ -335,10 +369,12 @@ def run_replay(policy: BasePolicy, replay_data: ReplayData, row_order: np.ndarra
     matched_clicks = []
 
     for row_idx in row_order:
-        # ===== 정책에 넘길 컨텍스트 (컨텍스추얼 정책만 후보 행렬 생성) =====
+        # ===== 정책에 넘길 컨텍스트 (컨텍스추얼 정책만 후보 행렬 생성, 슬롯은 사용 설정 시에만 반영) =====
         if policy.uses_context:
             context = replay_data.feature_builder.build_candidates(
-                replay_data.user_matrix[row_idx], replay_data.interaction_flags[row_idx]
+                replay_data.user_matrix[row_idx],
+                replay_data.interaction_flags[row_idx],
+                replay_data.positions[row_idx],
             )
         else:
             context = None
